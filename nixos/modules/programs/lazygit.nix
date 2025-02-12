@@ -4,7 +4,6 @@
   pkgs,
   ...
 }:
-
 let
   cfg = config.programs.lazygit;
 
@@ -23,6 +22,9 @@ in
         Lazygit configuration.
 
         See https://github.com/jesseduffield/lazygit/blob/master/docs/Config.md for documentation.
+      '';
+      example = lib.literalExpression ''
+        promptToReturnFromSubprocess = false;
       '';
     };
   };
