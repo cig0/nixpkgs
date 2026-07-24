@@ -1,3 +1,9 @@
+# Non-module arguments
+# These are separate from the module arguments to avoid implicit dependencies.
+# This makes service modules self-contained, allowing mixing of Nixpkgs versions.
+{ pkgs }:
+
+# The module
 {
   lib,
   config,
@@ -92,6 +98,11 @@ in
         to prevent systemd substitution. Set this option explicitly to enable
         systemd's substitution features.
 
+        When {option}`process.environment` contains keys set to `null`, the default
+        is automatically prefixed with `unexport KEY` invocations (from
+        `pkgs.execline`) so those variables are unset before the process starts,
+        regardless of what `Environment=` or inherited environment supplies.
+
         To extend {option}`process.argv` with systemd specifiers, you can append
         to the escaped arguments:
 
@@ -109,8 +120,19 @@ in
         for available specifiers like `%n`, `%i`, `%t`.
       '';
       type = types.str;
-      default = config.systemd.lib.escapeSystemdExecArgs config.process.argv;
-      defaultText = lib.literalExpression "config.systemd.lib.escapeSystemdExecArgs config.process.argv";
+      default =
+        let
+          nullEnvKeys = lib.attrNames (lib.filterAttrs (_: v: v == null) config.process.environment);
+        in
+        if nullEnvKeys == [ ] then
+          config.systemd.lib.escapeSystemdExecArgs config.process.argv
+        else
+          lib.concatMapStringsSep " " (
+            k: "${escapeSystemdExecArg "${pkgs.execline}/bin/unexport"} ${escapeSystemdExecArg k}"
+          ) nullEnvKeys
+          + " "
+          + config.systemd.lib.escapeSystemdExecArgs config.process.argv;
+      defaultText = lib.literalMD "The escaped `process.argv`, prefixed with `\"unexport\" \"KEY\"` (from `pkgs.execline`) for each key in `process.environment` set to `null`.";
     };
 
     systemd.mainExecReload = mkOption {
@@ -126,33 +148,29 @@ in
         `%i` (instance), `%t` (runtime directory), and environment variables using
         `''${VAR}` syntax in your command line.
 
-        By default, it is either set to null or this is set to the escaped version of {option}`process.reloadCommand`
-        when specified to prevent systemd substitution. Set this option explicitly to enable
-        systemd's substitution features.
+        By default, it is set to {option}`process.reloadCommand` when specified, or an
+        empty string otherwise. Because {option}`process.reloadCommand` is already a
+        command line (not an argument list), it is used verbatim so that references
+        like `$MAINPID` are preserved.
 
         To extend {option}`process.reloadCommand` with systemd specifiers, you can append
-        to the escaped arguments:
+        to the command line:
 
         ```nix
         systemd.mainExecReload =
-          config.systemd.lib.escapeSystemdExecArgs config.process.reload + " --systemd-unit %n";
+          config.process.reloadCommand + " --systemd-unit %n";
         ```
 
         This pattern allows you to pass the unit name (or other systemd specifiers)
-        as additional arguments while keeping the base command from {option}`process.argv`
-        properly escaped.
+        as additional arguments.
 
         See {manpage}`systemd.service(5)` (section "COMMAND LINES") for details on
         variable substitution and {manpage}`systemd.unit(5)` (section "SPECIFIERS")
         for available specifiers like `%n`, `%i`, `%t`.
       '';
       type = types.nullOr types.str;
-      default =
-        if config.process.reloadCommand then
-          config.systemd.lib.escapeSystemdExecArgs config.process.reloadCommand
-        else
-          "";
-      defaultText = lib.literalExpression "config.systemd.lib.escapeSystemdExecArgs config.process.reloadCommand";
+      default = if config.process.reloadCommand != null then config.process.reloadCommand else "";
+      defaultText = lib.literalExpression "config.process.reloadCommand";
     };
 
     systemd.services = mkOption {
@@ -191,7 +209,7 @@ in
         types.submoduleWith {
           class = "service";
           modules = [
-            ./service.nix
+            (lib.modules.importApply ./service.nix { inherit pkgs; })
           ];
           specialArgs = {
             inherit systemdPackage;
@@ -211,11 +229,12 @@ in
     systemd.services."" = {
       # TODO description;
       wantedBy = lib.mkDefault [ "multi-user.target" ];
+      environment = lib.mapAttrs (_: lib.mkDefault) (
+        lib.filterAttrs (_: v: v != null) config.process.environment
+      );
       serviceConfig = {
         ExecReload = config.systemd.mainExecReload;
-        Type = lib.mkDefault (
-          if (config.serviceManager.notificationProtocol == "systemd") then "notify" else "simple"
-        );
+        Type = lib.mkDefault (if config.notificationProtocol.systemd then "notify" else "simple");
         Restart = lib.mkDefault "always";
         RestartSec = lib.mkDefault "5";
         ExecStart = [
